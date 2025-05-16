@@ -1,0 +1,564 @@
+import React, { useState, useEffect, createContext, useContext } from "react";
+import { StyleSheet, View, Text, Button, Alert, FlatList, TouchableOpacity, TextInput, Image, Platform, Share } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImagePicker from "expo-image-picker";
+import * as Location from "expo-location";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import Constants from "expo-constants";
+import { Picker } from "@react-native-picker/picker";
+
+// Language context and translations
+const translations = {
+  en: {
+    welcome: "FieldMed Enhanced",
+    newVisit: "New Visit",
+    inventory: "Inventory",
+    history: "History",
+    name: "Name",
+    age: "Age",
+    gender: "Gender",
+    male: "Male",
+    female: "Female",
+    notes: "Notes",
+    symptoms: "Symptoms",
+    respiratoryRate: "Respiratory Rate",
+    weightKg: "Weight (kg)",
+    getSuggestion: "Get Suggestion",
+    restart: "Start Over",
+    medicationDosage: "Medication Dosage Calculator",
+    emergencyAlert: "Emergency Alert!",
+    attachPhoto: "Attach Photo",
+    location: "Location",
+    nearestClinics: "Nearest Clinics",
+    exportData: "Export Data",
+    selectLanguage: "Select Language",
+    toggleLanguage: "Switch to Spanish",
+  },
+  es: {
+    welcome: "FieldMed Mejorado",
+    newVisit: "Nueva Visita",
+    inventory: "Inventario",
+    history: "Historial",
+    name: "Nombre",
+    age: "Edad",
+    gender: "Género",
+    male: "Masculino",
+    female: "Femenino",
+    notes: "Notas",
+    symptoms: "Síntomas",
+    respiratoryRate: "Frecuencia Respiratoria",
+    weightKg: "Peso (kg)",
+    getSuggestion: "Obtener Sugerencia",
+    restart: "Comenzar de Nuevo",
+    medicationDosage: "Calculadora de Dosis",
+    emergencyAlert: "¡Alerta de Emergencia!",
+    attachPhoto: "Adjuntar Foto",
+    location: "Ubicación",
+    nearestClinics: "Clínicas Cercanas",
+    exportData: "Exportar Datos",
+    selectLanguage: "Seleccionar Idioma",
+    toggleLanguage: "Cambiar a Inglés",
+  },
+};
+
+const LanguageContext = createContext();
+
+function useLang() {
+  return useContext(LanguageContext);
+}
+
+// Sample clinics mock data for geolocation
+const clinics = [
+  { id: "1", name: "Community Clinic A", lat: 37.78825, lon: -122.4324 },
+  { id: "2", name: "Health Center B", lat: 37.78925, lon: -122.4224 },
+];
+
+// Helper: distance between coordinates (Haversine formula simplified)
+function getDistance(lat1, lon1, lat2, lon2) {
+  function toRad(x) {
+    return (x * Math.PI) / 180;
+  }
+  const R = 6371; // km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+export default function App() {
+  const [language, setLanguage] = useState("en");
+
+  // Provide language strings
+  const t = translations[language];
+
+  return (
+    <LanguageContext.Provider value={{ language, setLanguage, t }}>
+      <View style={styles.container}>
+        <Text style={styles.header}>{t.welcome}</Text>
+        <MainApp />
+      </View>
+    </LanguageContext.Provider>
+  );
+}
+
+function MainApp() {
+  const { t, language, setLanguage } = useLang();
+  const [screen, setScreen] = useState("newVisit"); // newVisit, inventory, history
+
+  return (
+    <View style={{ flex: 1, width: "100%" }}>
+      <View style={styles.navBar}>
+        <Button title={t.newVisit} onPress={() => setScreen("newVisit")} />
+        <Button title={t.inventory} onPress={() => setScreen("inventory")} />
+        <Button title={t.history} onPress={() => setScreen("history")} />
+      </View>
+      <View style={{ padding: 10, flex: 1 }}>
+        {screen === "newVisit" && <NewVisit />}
+        {screen === "inventory" && <Inventory />}
+        {screen === "history" && <History />}
+      </View>
+      <View style={styles.langSwitch}>
+        <Text>{t.selectLanguage}: </Text>
+        <Picker
+          selectedValue={language}
+          style={{ height: 50, width: 150 }}
+          onValueChange={(itemValue) => setLanguage(itemValue)}
+        >
+          <Picker.Item label="English" value="en" />
+          <Picker.Item label="Español" value="es" />
+        </Picker>
+      </View>
+    </View>
+  );
+}
+
+function NewVisit() {
+  const { t } = useLang();
+
+  const [step, setStep] = useState(0);
+
+  // Patient info
+  const [patientName, setPatientName] = useState("");
+  const [age, setAge] = useState("");
+  const [gender, setGender] = useState("male");
+  const [notes, setNotes] = useState("");
+  const [symptom, setSymptom] = useState("");
+  const [respiratoryRate, setRespiratoryRate] = useState("");
+  const [weight, setWeight] = useState("");
+  const [photoUri, setPhotoUri] = useState(null);
+  const [location, setLocation] = useState(null);
+
+  const [suggestion, setSuggestion] = useState("");
+  const [visitHistory, setVisitHistory] = useState([]);
+
+  // Load history from AsyncStorage
+  useEffect(() => {
+    (async () => {
+      try {
+        const history = await AsyncStorage.getItem("visitHistory");
+        if (history) {
+          setVisitHistory(JSON.parse(history));
+        }
+      } catch {}
+    })();
+  }, []);
+
+  // Save history to AsyncStorage on update
+  useEffect(() => {
+    AsyncStorage.setItem("visitHistory", JSON.stringify(visitHistory));
+  }, [visitHistory]);
+
+  // Location permission + fetch
+  useEffect(() => {
+    (async () => {
+      if (Platform.OS !== "web") {
+        let { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === "granted") {
+          let loc = await Location.getCurrentPositionAsync({});
+          setLocation(loc.coords);
+        }
+      }
+    })();
+  }, []);
+
+  const pickImage = async () => {
+    let permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (permissionResult.granted === false) {
+      alert("Permission to access camera roll is required!");
+      return;
+    }
+    let pickerResult = await ImagePicker.launchImageLibraryAsync({
+      allowsEditing: true,
+      quality: 0.5,
+    });
+    if (!pickerResult.cancelled) {
+      setPhotoUri(pickerResult.uri);
+    }
+  };
+
+  const takePhoto = async () => {
+    let permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+    if (permissionResult.granted === false) {
+      alert("Permission to access camera is required!");
+      return;
+    }
+    let pickerResult = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      quality: 0.5,
+    });
+    if (!pickerResult.cancelled) {
+      setPhotoUri(pickerResult.uri);
+    }
+  };
+
+  const handleNext = () => {
+    if (step === 2) {
+      let suggestionText = "";
+
+      if (symptom.toLowerCase().includes("fever")) {
+        suggestionText +=
+          "Suggest oral rehydration + Paracetamol. Monitor for malaria. ";
+      }
+      if (symptom.toLowerCase().includes("cough")) {
+        if (respiratoryRate && parseInt(respiratoryRate) > 30) {
+          suggestionText +=
+            "High respiratory rate. Start antibiotics or refer urgently. ";
+        } else {
+          suggestionText +=
+            "Cough with normal breathing rate. Likely viral. Suggest warm fluids and rest. ";
+        }
+      }
+      if (!suggestionText) {
+        suggestionText =
+          "Refer to nearest clinic or consult supervising doctor when in range.";
+      }
+
+      // Dosage calc example:
+      let dosage = "";
+      if (weight && symptom.toLowerCase().includes("fever")) {
+        const doseMg = Math.min(Math.max(weight * 15, 250), 1000); // 15mg/kg capped
+        dosage = `Paracetamol dosage: ${doseMg} mg every 6 hours.`;
+      }
+
+      const emergency =
+        respiratoryRate && parseInt(respiratoryRate) > 50
+          ? true
+          : false;
+
+      const newVisit = {
+        id: Date.now().toString(),
+        patientName,
+        age,
+        gender,
+        notes,
+        symptom,
+        respiratoryRate,
+        weight,
+        suggestion: suggestionText,
+        dosage,
+        emergency,
+        photoUri,
+        location,
+        date: new Date().toISOString(),
+      };
+
+      setVisitHistory([newVisit, ...visitHistory]);
+      setSuggestion(suggestionText + (dosage ? "\n" + dosage : ""));
+      setStep(3);
+    } else {
+      setStep(step + 1);
+    }
+  };
+
+  const handleRestart = () => {
+    setStep(0);
+    setPatientName("");
+    setAge("");
+    setGender("male");
+    setNotes("");
+    setSymptom("");
+    setRespiratoryRate("");
+    setWeight("");
+    setPhotoUri(null);
+    setSuggestion("");
+    setLocation(null);
+  };
+
+  return (
+    <View style={{ flex: 1 }}>
+      {step === 0 && (
+        <View>
+          <Text>{t.name}:</Text>
+          <TextInput
+            style={styles.input}
+            value={patientName}
+            onChangeText={setPatientName}
+            placeholder="e.g. Maria Okoro"
+          />
+          <Text>{t.age}:</Text>
+          <TextInput
+            style={styles.input}
+            value={age}
+            onChangeText={setAge}
+            keyboardType="numeric"
+            placeholder="e.g. 30"
+          />
+          <Text>{t.gender}:</Text>
+          <Picker
+            selectedValue={gender}
+            style={styles.picker}
+            onValueChange={(val) => setGender(val)}
+          >
+            <Picker.Item label={t.male} value="male" />
+            <Picker.Item label={t.female} value="female" />
+          </Picker>
+          <Text>{t.notes}:</Text>
+          <TextInput
+            style={[styles.input, { height: 60 }]}
+            value={notes}
+            onChangeText={setNotes}
+            multiline
+            placeholder="Additional notes"
+          />
+          <Button title="Next" onPress={() => setStep(1)} />
+        </View>
+      )}
+
+      {step === 1 && (
+        <View>
+          <Text>{t.symptoms}:</Text>
+          <TextInput
+            style={[styles.input, { height: 80 }]}
+            value={symptom}
+            onChangeText={setSymptom}
+            multiline
+            placeholder="Describe symptoms"
+          />
+          <Button title="Next" onPress={() => setStep(2)} />
+        </View>
+      )}
+
+      {step === 2 && (
+        <View>
+          {symptom.toLowerCase().includes("cough") && (
+            <>
+              <Text>{t.respiratoryRate}:</Text>
+              <TextInput
+                style={styles.input}
+                value={respiratoryRate}
+                onChangeText={setRespiratoryRate}
+                keyboardType="numeric"
+                placeholder="e.g. 32"
+              />
+            </>
+          )}
+          <Text>{t.weightKg}:</Text>
+          <TextInput
+            style={styles.input}
+            value={weight}
+            onChangeText={setWeight}
+            keyboardType="numeric"
+            placeholder="Patient weight"
+          />
+
+          <View style={{ flexDirection: "row", marginVertical: 10 }}>
+            <Button title={t.attachPhoto} onPress={pickImage} />
+            <View style={{ width: 10 }} />
+            <Button title="Take Photo" onPress={takePhoto} />
+          </View>
+          {photoUri && (
+            <Image
+              source={{ uri: photoUri }}
+              style={{ width: 200, height: 200, marginVertical: 10 }}
+            />
+          )}
+          <Button title={t.getSuggestion} onPress={handleNext} />
+        </View>
+      )}
+
+      {step === 3 && (
+        <View>
+          <Text style={{ fontWeight: "bold", fontSize: 18 }}>
+            {t.emergencyAlert}{" "}
+            {visitHistory[0]?.emergency ? "⚠️" : "✅"}
+          </Text>
+          <Text style={{ marginVertical: 10 }}>{suggestion}</Text>
+          <Button title={t.restart} onPress={handleRestart} />
+        </View>
+      )}
+    </View>
+  );
+}
+
+function Inventory() {
+  const { t } = useLang();
+  const [medInventory, setMedInventory] = useState({
+    paracetamol: true,
+    antibiotics: false,
+  });
+
+  useEffect(() => {
+    (async () => {
+      const inv = await AsyncStorage.getItem("medInventory");
+      if (inv) setMedInventory(JSON.parse(inv));
+    })();
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.setItem("medInventory", JSON.stringify(medInventory));
+  }, [medInventory]);
+
+  return (
+    <View>
+      <Text style={{ fontWeight: "bold", fontSize: 18 }}>
+        {t.inventory}
+      </Text>
+      {Object.entries(medInventory).map(([med, available]) => (
+        <View
+          key={med}
+          style={{ flexDirection: "row", justifyContent: "space-between", marginVertical: 10 }}
+        >
+          <Text style={{ fontSize: 16 }}>{med}</Text>
+          <Button
+            title={available ? "Available" : "Not Available"}
+            onPress={() =>
+              setMedInventory({ ...medInventory, [med]: !available })
+            }
+            color={available ? "green" : "red"}
+          />
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function History() {
+  const { t } = useLang();
+  const [visitHistory, setVisitHistory] = useState([]);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const history = await AsyncStorage.getItem("visitHistory");
+      if (history) setVisitHistory(JSON.parse(history));
+    })();
+  }, []);
+
+  const exportCSV = async () => {
+    // Create CSV string
+    let csv = "Name,Age,Gender,Symptoms,Suggestion,Date\n";
+    visitHistory.forEach((v) => {
+      csv += `"${v.patientName}","${v.age}","${v.gender}","${v.symptom.replace(/"/g, '""')}","${v.suggestion.replace(/"/g, '""')}","${v.date}"\n`;
+    });
+
+    const fileUri = FileSystem.documentDirectory + "visits.csv";
+    await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+
+    // Share the file
+    await Sharing.shareAsync(fileUri);
+  };
+
+  const getNearestClinic = (loc) => {
+    if (!loc) return null;
+    let nearest = clinics[0];
+    let minDist = getDistance(loc.latitude, loc.longitude, nearest.lat, nearest.lon);
+
+    clinics.forEach((c) => {
+      const dist = getDistance(loc.latitude, loc.longitude, c.lat, c.lon);
+      if (dist < minDist) {
+        nearest = c;
+        minDist = dist;
+      }
+    });
+
+    return nearest;
+  };
+
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={{ fontWeight: "bold", fontSize: 18 }}>{t.history}</Text>
+      <FlatList
+        data={visitHistory}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            onPress={() => setSelectedPatient(item)}
+            style={{
+              borderBottomWidth: 1,
+              borderBottomColor: "#ccc",
+              paddingVertical: 10,
+            }}
+          >
+            <Text>{item.patientName} - {new Date(item.date).toLocaleDateString()}</Text>
+          </TouchableOpacity>
+        )}
+      />
+      {selectedPatient && (
+        <View style={{ marginTop: 20 }}>
+          <Text style={{ fontWeight: "bold" }}>{selectedPatient.patientName}</Text>
+          <Text>{t.age}: {selectedPatient.age}</Text>
+          <Text>{t.gender}: {selectedPatient.gender}</Text>
+          <Text>{t.symptoms}: {selectedPatient.symptom}</Text>
+          <Text>{t.notes}: {selectedPatient.notes}</Text>
+          <Text>{t.suggestion}: {selectedPatient.suggestion}</Text>
+          <Text>{t.medicationDosage}: {selectedPatient.dosage}</Text>
+          <Text>{t.emergencyAlert}: {selectedPatient.emergency ? "Yes" : "No"}</Text>
+          {selectedPatient.photoUri && (
+            <Image
+              source={{ uri: selectedPatient.photoUri }}
+              style={{ width: 200, height: 200, marginVertical: 10 }}
+            />
+          )}
+          {selectedPatient.location && (
+            <View>
+              <Text>{t.location}: {selectedPatient.location.latitude.toFixed(5)}, {selectedPatient.location.longitude.toFixed(5)}</Text>
+              <Text>{t.nearestClinics}: {getNearestClinic(selectedPatient.location)?.name}</Text>
+            </View>
+          )}
+          <Button title={t.exportData} onPress={exportCSV} />
+          <Button title="Close" onPress={() => setSelectedPatient(null)} />
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    paddingTop: Constants.statusBarHeight + 10,
+    alignItems: "center",
+    backgroundColor: "#f5f5f5",
+  },
+  header: {
+    fontSize: 22,
+    fontWeight: "bold",
+    marginBottom: 10,
+  },
+  navBar: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginBottom: 10,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#aaa",
+    borderRadius: 5,
+    padding: 8,
+    marginBottom: 10,
+    backgroundColor: "white",
+  },
+  picker: {
+    height: 50,
+    marginBottom: 10,
+  },
+  langSwitch: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: 10,
+  },
+});
